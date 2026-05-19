@@ -1,0 +1,6 @@
+{
+  "name": "Khí Dung Pro",
+  "description": "Hệ thống quản lý và sắp xếp lịch phun khí dung thông minh cho bệnh viện.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
