@@ -1,6 +1,20 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Nurse, Patient, TreatmentSession, NURSES, scheduleTreatments } from './lib/scheduler';
 import html2pdf from 'html2pdf.js';
+import { saveAs } from 'file-saver';
+import { 
+  Document as DocxDocument, 
+  Packer, 
+  Paragraph, 
+  Table, 
+  TableCell, 
+  TableRow, 
+  WidthType, 
+  AlignmentType, 
+  VerticalAlign, 
+  BorderStyle,
+  TextRun
+} from 'docx';
 
 import { PatientForm } from './components/PatientForm';
 import { format } from 'date-fns';
@@ -12,7 +26,8 @@ import {
   RefreshCw,
   AlertTriangle,
   CheckCircle2,
-  Table as TableIcon
+  Table as TableIcon,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useReactToPrint } from 'react-to-print';
@@ -63,13 +78,16 @@ export default function App() {
   };
 
   const handleBulkAdd = () => {
+    if (!bulkInput.trim()) return;
+    setIsLoading(true);
+    
+    // Process input immediately from bulkInput to avoid stale React closure values
     const lines = bulkInput.trim().split('\n').filter(l => l.trim());
-    const currentMaxStt = patients.length > 0 ? Math.max(...patients.map(p => p.stt)) : 0;
     
     const newPs: Patient[] = lines.map((line, idx) => {
       const parts = line.split(/[,-]/).map(p => p.trim());
       const [name, time, timesStr] = parts;
-      const stt = currentMaxStt + idx + 1;
+      const stt = idx + 1;
       return {
         id: Math.random().toString(36).substring(2, 11),
         stt: stt,
@@ -81,16 +99,16 @@ export default function App() {
         notes: ''
       };
     });
-    updateData([...patients, ...newPs]);
-    setBulkInput('');
-  };
 
-  const autoSchedule = () => {
-    setIsLoading(true);
+    setPatients(newPs);
+    
+    // Simulate a brief calculation delay for smooth premium UX transition,
+    // using the exact newly computed separate list.
     setTimeout(() => {
-      setSessions(scheduleTreatments(patients, nurses, totalPatients));
+      setSessions(scheduleTreatments(newPs, nurses, totalPatients));
+      setBulkInput('');
       setIsLoading(false);
-    }, 500);
+    }, 400);
   };
 
   const safeFormat = (date: any, fmt: string) => {
@@ -128,6 +146,98 @@ export default function App() {
     } catch (error) {
       console.error('Excel Export Error:', error);
       alert('Có lỗi khi xuất file Excel. Vui lòng thử lại.');
+    }
+  };
+
+  const exportWord = async () => {
+    try {
+      if (sortedSessions.length === 0) {
+        alert('Chưa có dữ liệu để xuất Word. Vui lòng nhập số bệnh nhân hoặc danh sách và nhấn "CẬP NHẬT".');
+        return;
+      }
+
+      const tableRows = [
+        new TableRow({
+          children: [
+            "STT", "Người bệnh", "Lần", "Y Lệnh", "Bắt đầu", "Kết thúc", "Điều dưỡng", "Máy"
+          ].map(text => new TableCell({
+            children: [new Paragraph({ 
+              children: [new TextRun({ text, bold: true, size: 26, font: "Arial" })],
+              alignment: AlignmentType.CENTER 
+            })],
+            verticalAlign: VerticalAlign.CENTER,
+            shading: { fill: "f3f4f6" }
+          }))
+        }),
+        ...sortedSessions.map((s, idx) => new TableRow({
+          children: [
+            (idx + 1).toString(),
+            s.patientName,
+            `L${s.sessionOrder}`,
+            s.orderTime || "",
+            safeFormat(s.startTime, 'HH:mm'),
+            safeFormat(s.endTime, 'HH:mm'),
+            s.nurseName,
+            s.machineCode
+          ].map((text, i) => new TableCell({
+            children: [new Paragraph({ 
+              children: [new TextRun({ 
+                text, 
+                size: 24, 
+                bold: i === 1, // Bold the patient's name for visual structure
+                font: "Arial" 
+              })],
+              alignment: i === 1 ? AlignmentType.LEFT : AlignmentType.CENTER 
+            })],
+            verticalAlign: VerticalAlign.CENTER
+          }))
+        }))
+      ];
+
+      const table = new Table({
+        rows: tableRows,
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: {
+          top: { style: BorderStyle.SINGLE, size: 1 },
+          bottom: { style: BorderStyle.SINGLE, size: 1 },
+          left: { style: BorderStyle.SINGLE, size: 1 },
+          right: { style: BorderStyle.SINGLE, size: 1 },
+          insideHorizontal: { style: BorderStyle.SINGLE, size: 1 },
+          insideVertical: { style: BorderStyle.SINGLE, size: 1 },
+        }
+      });
+
+      const doc = new DocxDocument({
+        sections: [{
+          children: [
+            new Paragraph({
+              children: [new TextRun({ text: "BỆNH VIỆN ĐA KHOA", bold: true, size: 24 })],
+              alignment: AlignmentType.LEFT
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: "KHOA NỘI - NHI - NHIỄM", bold: true, size: 28 })],
+              alignment: AlignmentType.LEFT
+            }),
+            new Paragraph({ text: "" }),
+            new Paragraph({
+              children: [new TextRun({ text: "BẢNG LỊCH PHUN KHÍ DUNG", bold: true, size: 36, underline: {} })],
+              alignment: AlignmentType.CENTER
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: `Ngày in: ${format(new Date(), 'dd/MM/yyyy')}` })],
+              alignment: AlignmentType.RIGHT
+            }),
+            new Paragraph({ text: "" }),
+            table
+          ]
+        }]
+      });
+
+      const blob = await Packer.toBlob(doc);
+      saveAs(blob, `Lich_Phun_Khi_Dung_${format(new Date(), 'yyyyMMdd')}.docx`);
+    } catch (error) {
+      console.error('Word Export Error:', error);
+      alert('Có lỗi khi xuất file Word. Vui lòng thử lại.');
     }
   };
 
@@ -292,16 +402,26 @@ export default function App() {
               Tên - Giờ y lệnh - Số lần phun
             </p>
             <button 
-              onClick={() => {
-                handleBulkAdd();
-                autoSchedule();
-              }}
+              onClick={handleBulkAdd}
               disabled={isLoading || !bulkInput.trim()}
               className="w-full mt-6 bg-gradient-to-br from-[#1e40af] to-[#4f46e5] text-white py-5 rounded-[1.5rem] font-black uppercase text-sm tracking-widest flex items-center justify-center gap-3 hover:brightness-110 active:scale-[0.98] transition-all shadow-xl shadow-blue-600/30 disabled:opacity-50"
             >
               {isLoading ? <RefreshCw className="animate-spin" size={20} /> : null}
               Tạo bảng phân công
             </button>
+            {patients.length > 0 && (
+              <button
+                onClick={() => {
+                  if (confirm('Bạn có chắc chắn muốn xóa toàn bộ danh sách người bệnh hiện tại không?')) {
+                    setPatients([]);
+                    setSessions([]);
+                  }
+                }}
+                className="w-full mt-3 bg-red-50 text-red-600 hover:bg-red-100 py-3 rounded-2xl font-bold uppercase text-xs tracking-widest flex items-center justify-center gap-2 transition-all border border-red-100/50"
+              >
+                Xóa toàn bộ danh sách ({patients.length})
+              </button>
+            )}
           </div>
         </aside>
 
@@ -312,24 +432,24 @@ export default function App() {
               <h2 className="text-3xl font-[900] text-slate-800 tracking-tight flex items-center gap-4">
                 CHI TIẾT THỰC HIỆN
               </h2>
-              <div className="flex gap-4">
+              <div className="flex flex-wrap gap-4">
                 <button 
                   onClick={exportExcel} 
-                  className="bg-emerald-100 text-emerald-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-emerald-600 hover:text-white transition-all shadow-sm"
+                  className="bg-emerald-100 text-emerald-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-emerald-600 hover:text-white transition-all shadow-sm cursor-pointer"
                 >
                   <TableIcon size={18} /> Xuất Excel
                 </button>
                 <button 
-                  onClick={handleBrowserPrint} 
-                  className="bg-slate-100 text-slate-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-slate-900 hover:text-white transition-all shadow-sm"
+                  onClick={exportWord} 
+                  className="bg-blue-100 text-blue-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-blue-600 hover:text-white transition-all shadow-sm cursor-pointer"
                 >
-                  <Printer size={18} /> In trực tiếp
+                  <FileText size={18} /> Xuất Word
                 </button>
                 <button 
-                  onClick={exportPDF} 
-                  className="bg-[#1e40af] text-white px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:brightness-110 transition-all shadow-xl shadow-blue-600/20"
+                  onClick={handleBrowserPrint} 
+                  className="bg-slate-100 text-slate-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-slate-900 hover:text-white transition-all shadow-sm cursor-pointer"
                 >
-                  <FileDown size={18} /> Tải file PDF
+                  <Printer size={18} /> In trực tiếp
                 </button>
               </div>
             </div>
