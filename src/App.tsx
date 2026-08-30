@@ -1,5 +1,15 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Nurse, Patient, TreatmentSession, NURSES, scheduleTreatments } from './lib/scheduler';
+import { 
+  getScheduleByDate, 
+  saveScheduleByDate, 
+  getYesterdayDate,
+  getDepartmentMachines,
+  saveDepartmentMachines,
+  getPatientsAsRawText,
+  convertPatientsToRawText,
+  getAvailableDates
+} from './lib/dateStorage';
 import html2pdf from 'html2pdf.js';
 import { saveAs } from 'file-saver';
 import { 
@@ -17,7 +27,10 @@ import {
 } from 'docx';
 
 import { PatientForm } from './components/PatientForm';
-import { format } from 'date-fns';
+import { HistoryModal } from './components/HistoryModal';
+import { CopyScheduleModal } from './components/CopyScheduleModal';
+import { MachineManagerModal } from './components/MachineManagerModal';
+import { format, parseISO } from 'date-fns';
 import { 
   Users, 
   Stethoscope, 
@@ -27,61 +40,140 @@ import {
   AlertTriangle,
   CheckCircle2,
   Table as TableIcon,
-  FileText
+  FileText,
+  Calendar,
+  Copy,
+  Zap,
+  History,
+  Cpu,
+  Settings2,
+  ArrowDownToLine,
+  Check,
+  Edit3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useReactToPrint } from 'react-to-print';
 import * as XLSX from 'xlsx';
 
 export default function App() {
+  const [selectedDate, setSelectedDate] = useState<string>(() => format(new Date(), 'yyyy-MM-dd'));
   const [patients, setPatients] = useState<Patient[]>([]);
   const [sessions, setSessions] = useState<TreatmentSession[]>([]);
   const [nurses, setNurses] = useState<Nurse[]>(NURSES);
   const [totalPatients, setTotalPatients] = useState<number>(0);
   const [bulkInput, setBulkInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [infoBanner, setInfoBanner] = useState<string | null>(null);
+  const [departmentMachines, setDepartmentMachines] = useState<string[]>(() => getDepartmentMachines());
   const printRef = useRef<HTMLDivElement>(null);
+
+  // Modals
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showCopyModal, setShowCopyModal] = useState(false);
+  const [showMachineModal, setShowMachineModal] = useState(false);
+  const [isQuickYesterdayMode, setIsQuickYesterdayMode] = useState(false);
+
+  const availableHistoryDates = useMemo(() => getAvailableDates(), [selectedDate, showHistoryModal, showCopyModal]);
 
   const handlePrint = useReactToPrint({
     contentRef: printRef,
-    documentTitle: `Lich_Phun_Khi_Dung_${format(new Date(), 'ddMMyyyy')}`,
+    documentTitle: `Lich_Phun_Khi_Dung_${selectedDate}`,
   });
 
-  // Load config on mount
+  // Load config & date schedule on mount or selectedDate change
   useEffect(() => {
-    localStorage.removeItem('hospital_patients'); 
-    localStorage.removeItem('hospital_sessions');
     const savedN = localStorage.getItem('hospital_nurses');
     const savedT = localStorage.getItem('hospital_total_patients');
     
     if (savedN) setNurses(JSON.parse(savedN));
     if (savedT) setTotalPatients(parseInt(savedT));
-    setPatients([]);
-    setSessions([]);
-  }, []);
 
-  const updateData = (newPatients: Patient[], currentNurses: Nurse[] = nurses, currentTotal: number = totalPatients) => {
+    // Load schedule for selectedDate
+    const existing = getScheduleByDate(selectedDate);
+    if (existing) {
+      setPatients(existing.patients || []);
+      setSessions(existing.sessions || []);
+    } else {
+      setPatients([]);
+      setSessions([]);
+    }
+  }, [selectedDate]);
+
+  const updateDataAndSave = (
+    newPatients: Patient[], 
+    currentNurses: Nurse[] = nurses, 
+    currentTotal: number = totalPatients,
+    targetDate: string = selectedDate
+  ) => {
+    const generatedSessions = scheduleTreatments(newPatients, currentNurses, currentTotal);
     setPatients(newPatients);
-    setSessions(scheduleTreatments(newPatients, currentNurses, currentTotal));
+    setSessions(generatedSessions);
+    saveScheduleByDate(targetDate, newPatients, generatedSessions, currentTotal);
   };
 
   const updateNurses = (newNurses: Nurse[]) => {
     setNurses(newNurses);
     localStorage.setItem('hospital_nurses', JSON.stringify(newNurses));
-    setSessions(scheduleTreatments(patients, newNurses, totalPatients));
+    const updatedSessions = scheduleTreatments(patients, newNurses, totalPatients);
+    setSessions(updatedSessions);
+    saveScheduleByDate(selectedDate, patients, updatedSessions, totalPatients);
+  };
+
+  const handleSaveMachines = (newMachines: string[]) => {
+    setDepartmentMachines(newMachines);
+    saveDepartmentMachines(newMachines);
+  };
+
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  const handleNurseMachineChange = (nurseIndex: number, newCode: string) => {
+    const updated = [...nurses];
+    updated[nurseIndex].machineCode = newCode;
+    updateNurses(updated);
+  };
+
+  const handleLoadYesterdayRawText = () => {
+    const yesterday = getYesterdayDate(selectedDate);
+    const rawText = getPatientsAsRawText(yesterday);
+    if (!rawText.trim()) {
+      setInfoBanner(`⚠️ Chưa tìm thấy lịch phun khí dung của ngày hôm qua (${format(parseISO(yesterday), 'dd/MM/yyyy')}). Bạn có thể bấm nút "LỊCH SỬ" ở trên để chọn ngày khác.`);
+      setTimeout(() => setInfoBanner(null), 7000);
+      return;
+    }
+
+    setBulkInput(rawText);
+    const linesCount = rawText.trim().split('\n').length;
+    setInfoBanner(`Đã nạp ${linesCount} người bệnh từ ngày hôm qua (${format(parseISO(yesterday), 'dd/MM/yyyy')}). Bạn có thể xóa bệnh nhân đã xuất viện rồi bấm "TẠO BẢNG PHÂN CÔNG".`);
+    setTimeout(() => setInfoBanner(null), 8000);
+  };
+
+  const handleLoadDateRawText = (targetDateStr: string) => {
+    if (!targetDateStr) return;
+    const rawText = getPatientsAsRawText(targetDateStr);
+    if (!rawText.trim()) {
+      setInfoBanner(`⚠️ Ngày ${format(parseISO(targetDateStr), 'dd/MM/yyyy')} chưa có dữ liệu người bệnh.`);
+      setTimeout(() => setInfoBanner(null), 6000);
+      return;
+    }
+
+    setBulkInput(rawText);
+    const linesCount = rawText.trim().split('\n').length;
+    setInfoBanner(`Đã nạp ${linesCount} người bệnh từ ngày ${format(parseISO(targetDateStr), 'dd/MM/yyyy')}. Bạn có thể chỉnh sửa và bấm "TẠO BẢNG PHÂN CÔNG".`);
+    setTimeout(() => setInfoBanner(null), 8000);
   };
 
   const updateTotalPatients = (val: number) => {
     setTotalPatients(val);
     localStorage.setItem('hospital_total_patients', val.toString());
-    setSessions(scheduleTreatments(patients, nurses, val));
+    const updatedSessions = scheduleTreatments(patients, nurses, val);
+    setSessions(updatedSessions);
+    saveScheduleByDate(selectedDate, patients, updatedSessions, val);
   };
 
   const handleBulkAdd = () => {
     if (!bulkInput.trim()) return;
     setIsLoading(true);
     
-    // Process input immediately from bulkInput to avoid stale React closure values
     const lines = bulkInput.trim().split('\n').filter(l => l.trim());
     
     const newPs: Patient[] = lines.map((line, idx) => {
@@ -93,7 +185,7 @@ export default function App() {
         stt: stt,
         patientId: `BN${String(stt).padStart(3, '0')}`,
         name: name || 'Bệnh nhân chưa tên',
-        date: format(new Date(), 'yyyy-MM-dd'),
+        date: selectedDate,
         orderTime: time || '08:00',
         times: parseInt(timesStr) || 1,
         notes: ''
@@ -102,10 +194,10 @@ export default function App() {
 
     setPatients(newPs);
     
-    // Simulate a brief calculation delay for smooth premium UX transition,
-    // using the exact newly computed separate list.
     setTimeout(() => {
-      setSessions(scheduleTreatments(newPs, nurses, totalPatients));
+      const generatedSessions = scheduleTreatments(newPs, nurses, totalPatients);
+      setSessions(generatedSessions);
+      saveScheduleByDate(selectedDate, newPs, generatedSessions, totalPatients);
       setBulkInput('');
       setIsLoading(false);
     }, 400);
@@ -338,7 +430,7 @@ export default function App() {
             HỆ THỐNG LẬP LỊCH PHUN KHÍ DUNG
           </h1>
           <p className="font-bold text-blue-100/90 tracking-widest uppercase text-sm">
-            TTYT KHU VỰC CHỢ LÁCH • KHOA NỘI - NHI - NHIỄM
+            BVĐK KHU VỰC CHỢ LÁCH • KHOA NỘI TH - NHI - TRUYỀN NHIỄM
           </p>
         </div>
       </div>
@@ -352,75 +444,235 @@ export default function App() {
               Cấu hình hệ thống
             </h4>
 
-            <div className="space-y-8">
+            <div className="space-y-6">
               <div>
-                <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">Số bệnh nhân nội trú</label>
+                <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2.5">Ngày làm việc</label>
+                <div className="relative flex items-center gap-2">
+                  <Calendar size={20} className="text-blue-600 absolute left-4 pointer-events-none" />
+                  <input 
+                    type="date" 
+                    value={selectedDate}
+                    onChange={(e) => setSelectedDate(e.target.value)}
+                    className="w-full bg-blue-50/50 border border-blue-200 rounded-2xl pl-12 pr-4 py-3 font-black text-base text-blue-900 outline-none focus:ring-2 ring-blue-500/20 transition-all cursor-pointer shadow-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2.5">Số bệnh nhân nội trú</label>
                 <div className="relative">
                   <input 
                     type="number" 
                     value={totalPatients}
                     onChange={(e) => updateTotalPatients(parseInt(e.target.value) || 0)}
-                    className="w-full bg-slate-50 border border-slate-100 rounded-2xl px-6 py-4 font-black text-xl outline-none focus:ring-2 ring-blue-500/20 transition-all"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-3 font-black text-lg outline-none focus:ring-2 ring-blue-500/20 transition-all"
                     placeholder="0"
                   />
                 </div>
               </div>
 
-              {nurses.map((nurse, idx) => (
-                <div key={nurse.id}>
-                  <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">
-                    {idx === 2 ? 'Điều dưỡng hành chính (ĐD 3)' : `Điều dưỡng trực ${idx === 0 ? 'A' : 'B'}`}
+              {/* Nurses and Machine Assignments */}
+              <div className="space-y-4 pt-2 border-t border-slate-100">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[11px] font-black text-slate-500 uppercase tracking-widest">
+                    Điều dưỡng & Mã máy
                   </label>
-                  <input 
-                    type="text" 
-                    value={nurse.name}
-                    onChange={(e) => {
-                      const newNurses = [...nurses];
-                      newNurses[idx].name = e.target.value;
-                      updateNurses(newNurses);
-                    }}
-                    className="w-full bg-slate-50 border border-slate-100 rounded-2xl px-6 py-4 font-bold text-lg outline-none focus:ring-2 ring-blue-500/20 transition-all text-slate-700"
-                    placeholder="Nhập tên..."
-                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowMachineModal(true)}
+                    className="text-[11px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Quản lý danh mục mã máy của khoa"
+                  >
+                    <Cpu size={13} /> Quản lý mã máy
+                  </button>
                 </div>
-              ))}
+
+                {nurses.map((nurse, idx) => (
+                  <div key={nurse.id} className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-2xl space-y-2">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                      <span>{idx === 2 ? 'Điều dưỡng hành chính (ĐD 3)' : `Điều dưỡng trực ${idx === 0 ? 'A' : 'B'}`}</span>
+                      <span className="flex items-center gap-1.5 font-mono text-xs font-black">
+                        <span 
+                          className="w-2.5 h-2.5 rounded-full inline-block"
+                          style={{ backgroundColor: getMachineColor(nurse.machineCode) }}
+                        />
+                        Máy: {nurse.machineCode}
+                      </span>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        value={nurse.name}
+                        onChange={(e) => {
+                          const newNurses = [...nurses];
+                          newNurses[idx].name = e.target.value;
+                          updateNurses(newNurses);
+                        }}
+                        className="flex-1 bg-white border border-slate-200 rounded-xl px-3.5 py-2 font-bold text-sm outline-none focus:ring-2 ring-blue-500/20 text-slate-800"
+                        placeholder="Nhập tên ĐD..."
+                      />
+
+                      <select
+                        value={nurse.machineCode}
+                        onChange={(e) => handleNurseMachineChange(idx, e.target.value)}
+                        className="bg-white border border-slate-200 rounded-xl px-3 py-2 font-mono font-black text-xs text-blue-900 outline-none focus:ring-2 ring-blue-500/20 cursor-pointer"
+                        title="Chọn mã máy phụ trách"
+                      >
+                        {departmentMachines.map(m => (
+                          <option key={m} value={m}>
+                            Máy {m}
+                          </option>
+                        ))}
+                        {!departmentMachines.includes(nurse.machineCode) && (
+                          <option value={nurse.machineCode}>
+                            Máy {nurse.machineCode}
+                          </option>
+                        )}
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowMachineModal(true)}
+                className="w-full bg-slate-100 hover:bg-slate-200/80 text-slate-700 py-2.5 px-4 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer border border-slate-200"
+              >
+                <Cpu size={15} className="text-blue-600" /> Bổ sung / Cấu hình mã máy của khoa
+              </button>
             </div>
           </div>
 
-          <div className="bg-white rounded-[2rem] p-8 shadow-2xl shadow-blue-900/5 border border-white flex-1">
-            <h4 className="flex items-center gap-3 font-black text-[#1e40af] mb-6 uppercase text-sm tracking-widest relative">
-              <span className="w-1.5 h-6 bg-[#1e40af] rounded-full absolute -left-4" />
-              Dữ liệu người bệnh PKD
-            </h4>
+          {/* Bulk Patient Input Area */}
+          <div className="bg-white rounded-[2rem] p-8 shadow-2xl shadow-blue-900/5 border border-white flex-1 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="flex items-center gap-3 font-black text-[#1e40af] uppercase text-sm tracking-widest relative">
+                <span className="w-1.5 h-6 bg-[#1e40af] rounded-full absolute -left-4" />
+                Dữ liệu người bệnh PKD
+              </h4>
+            </div>
+
+            {/* Notification Banner */}
+            {infoBanner && (
+              <div className="mb-4 bg-emerald-50 border border-emerald-200 text-emerald-800 p-3 rounded-2xl text-xs font-bold flex items-start gap-2 animate-in fade-in">
+                <CheckCircle2 size={16} className="text-emerald-600 shrink-0 mt-0.5" />
+                <div className="flex-1">{infoBanner}</div>
+                <button onClick={() => setInfoBanner(null)} className="text-emerald-600 hover:text-emerald-900 font-black ml-1 cursor-pointer">✕</button>
+              </div>
+            )}
+
+            {/* Quick Load Tools from Previous Days */}
+            <div className="mb-3 p-3 bg-blue-50/70 border border-blue-100 rounded-2xl space-y-2">
+              <div className="flex items-center justify-between text-[11px] font-black text-blue-900 uppercase tracking-wider">
+                <span>⚡ Lấy dữ liệu hôm trước (Tên - Giờ - Lần):</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleLoadYesterdayRawText}
+                  className="flex-1 bg-white hover:bg-blue-600 hover:text-white text-blue-700 border border-blue-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                  title="Nạp nhanh danh sách ngày hôm qua vào ô nhập liệu"
+                >
+                  <ArrowDownToLine size={14} /> Tải ngày hôm qua
+                </button>
+
+                {availableHistoryDates.length > 0 && (
+                  <select
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        handleLoadDateRawText(e.target.value);
+                        e.target.value = '';
+                      }
+                    }}
+                    defaultValue=""
+                    className="bg-white border border-blue-200 text-slate-700 px-3 py-2 rounded-xl text-xs font-bold outline-none cursor-pointer shadow-sm"
+                  >
+                    <option value="" disabled>📅 Chọn ngày khác...</option>
+                    {availableHistoryDates.map(d => (
+                      <option key={d} value={d}>
+                        Ngày {format(parseISO(d), 'dd/MM/yyyy')}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+
             <textarea 
               value={bulkInput}
               onChange={(e) => setBulkInput(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-100 rounded-2xl p-5 min-h-[300px] outline-none focus:ring-2 ring-blue-500/20 font-bold text-sm text-slate-600 resize-none leading-relaxed"
-              placeholder="VD: Nguyễn Văn A - 08:30 - 3&#10;Trần Thị B - 09:00 - 2"
+              className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 min-h-[220px] flex-1 outline-none focus:ring-2 ring-blue-500/20 font-mono font-bold text-xs text-slate-700 resize-none leading-relaxed shadow-inner"
+              placeholder="VD:&#10;Nguyễn Văn A - 08:30 - 3&#10;Trần Thị B - 09:00 - 2&#10;Lê Văn C - 08:00 - 1"
             />
-            <p className="mt-3 text-[10px] text-slate-400 font-bold italic text-center">
-              Tên - Giờ y lệnh - Số lần phun
+            <p className="mt-2 text-[10px] text-slate-400 font-bold italic text-center">
+              Định dạng: Tên - Giờ y lệnh - Số lần phun
             </p>
+
             <button 
               onClick={handleBulkAdd}
               disabled={isLoading || !bulkInput.trim()}
-              className="w-full mt-6 bg-gradient-to-br from-[#1e40af] to-[#4f46e5] text-white py-5 rounded-[1.5rem] font-black uppercase text-sm tracking-widest flex items-center justify-center gap-3 hover:brightness-110 active:scale-[0.98] transition-all shadow-xl shadow-blue-600/30 disabled:opacity-50"
+              className="w-full mt-4 bg-gradient-to-br from-[#1e40af] to-[#4f46e5] text-white py-4 rounded-[1.5rem] font-black uppercase text-xs tracking-widest flex items-center justify-center gap-3 hover:brightness-110 active:scale-[0.98] transition-all shadow-xl shadow-blue-600/30 disabled:opacity-50 cursor-pointer"
             >
-              {isLoading ? <RefreshCw className="animate-spin" size={20} /> : null}
+              {isLoading ? <RefreshCw className="animate-spin" size={18} /> : null}
               Tạo bảng phân công
             </button>
+
             {patients.length > 0 && (
-              <button
-                onClick={() => {
-                  if (confirm('Bạn có chắc chắn muốn xóa toàn bộ danh sách người bệnh hiện tại không?')) {
-                    setPatients([]);
-                    setSessions([]);
-                  }
-                }}
-                className="w-full mt-3 bg-red-50 text-red-600 hover:bg-red-100 py-3 rounded-2xl font-bold uppercase text-xs tracking-widest flex items-center justify-center gap-2 transition-all border border-red-100/50"
-              >
-                Xóa toàn bộ danh sách ({patients.length})
-              </button>
+              <div className="space-y-2 mt-2.5">
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const text = convertPatientsToRawText(patients);
+                      setBulkInput(text);
+                      setInfoBanner('Đã đưa danh sách hiện tại vào ô nhập để bạn chỉnh sửa.');
+                    }}
+                    className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-2.5 rounded-xl font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                    title="Chuyển bảng hiện tại vào ô nhập để sửa tiếp"
+                  >
+                    <Edit3 size={13} /> Sửa danh sách hiện tại
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowClearConfirm(true)}
+                    className="bg-red-50 text-red-600 hover:bg-red-100 px-3 py-2.5 rounded-xl font-bold text-[11px] flex items-center justify-center gap-1 transition-all border border-red-100 cursor-pointer"
+                    title="Xóa danh sách"
+                  >
+                    Xóa ({patients.length})
+                  </button>
+                </div>
+
+                {showClearConfirm && (
+                  <div className="bg-red-50 border border-red-200 p-2.5 rounded-xl flex items-center justify-between gap-2 text-xs font-bold text-red-800 animate-in fade-in">
+                    <span>Xác nhận xóa {patients.length} BN?</span>
+                    <div className="flex gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPatients([]);
+                          setSessions([]);
+                          saveScheduleByDate(selectedDate, [], [], totalPatients);
+                          setShowClearConfirm(false);
+                          setInfoBanner('Đã xóa toàn bộ danh sách người bệnh hiện tại.');
+                          setTimeout(() => setInfoBanner(null), 4000);
+                        }}
+                        className="bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer shadow-sm"
+                      >
+                        Xóa hết
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowClearConfirm(false)}
+                        className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-lg text-[11px] font-bold cursor-pointer"
+                      >
+                        Hủy
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </aside>
@@ -429,27 +681,57 @@ export default function App() {
         <main className="flex-1 flex flex-col gap-6">
           <div className="bg-white/80 backdrop-blur-md rounded-[2rem] overflow-hidden shadow-2xl shadow-blue-900/5 border border-white min-h-[800px]">
             <div className="p-8 pb-0 flex flex-col md:flex-row items-center justify-between gap-4 no-print">
-              <h2 className="text-3xl font-[900] text-slate-800 tracking-tight flex items-center gap-4">
-                CHI TIẾT THỰC HIỆN
-              </h2>
-              <div className="flex flex-wrap gap-4">
+              <div>
+                <h2 className="text-3xl font-[900] text-slate-800 tracking-tight flex items-center gap-4">
+                  CHI TIẾT THỰC HIỆN
+                </h2>
+                <p className="text-xs font-bold text-slate-400 mt-1">
+                  Ngày đang hiển thị: <span className="text-blue-600 font-black">{format(parseISO(selectedDate), 'dd/MM/yyyy')}</span> ({sessions.length} lượt phun)
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2.5">
+                <button 
+                  onClick={() => {
+                    setIsQuickYesterdayMode(false);
+                    setShowCopyModal(true);
+                  }}
+                  className="bg-indigo-600 text-white px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-md shadow-indigo-600/20 cursor-pointer"
+                >
+                  <Copy size={16} /> Sao chép lịch
+                </button>
+                <button 
+                  onClick={() => {
+                    setIsQuickYesterdayMode(true);
+                    setShowCopyModal(true);
+                  }}
+                  className="bg-amber-500 text-white px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-amber-600 transition-all shadow-md shadow-amber-500/20 cursor-pointer"
+                >
+                  <Zap size={16} /> Sao chép hôm qua
+                </button>
+                <button 
+                  onClick={() => setShowHistoryModal(true)}
+                  className="bg-blue-600 text-white px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-blue-700 transition-all shadow-md shadow-blue-600/20 cursor-pointer"
+                >
+                  <History size={16} /> Lịch sử
+                </button>
                 <button 
                   onClick={exportExcel} 
-                  className="bg-emerald-100 text-emerald-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-emerald-600 hover:text-white transition-all shadow-sm cursor-pointer"
+                  className="bg-emerald-100 text-emerald-700 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-emerald-600 hover:text-white transition-all shadow-sm cursor-pointer"
                 >
-                  <TableIcon size={18} /> Xuất Excel
+                  <TableIcon size={16} /> Xuất Excel
                 </button>
                 <button 
                   onClick={exportWord} 
-                  className="bg-blue-100 text-blue-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-blue-600 hover:text-white transition-all shadow-sm cursor-pointer"
+                  className="bg-blue-100 text-blue-700 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-blue-600 hover:text-white transition-all shadow-sm cursor-pointer"
                 >
-                  <FileText size={18} /> Xuất Word
+                  <FileText size={16} /> Xuất Word
                 </button>
                 <button 
                   onClick={handleBrowserPrint} 
-                  className="bg-slate-100 text-slate-700 px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3 hover:bg-slate-900 hover:text-white transition-all shadow-sm cursor-pointer"
+                  className="bg-slate-100 text-slate-700 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-slate-900 hover:text-white transition-all shadow-sm cursor-pointer"
                 >
-                  <Printer size={18} /> In trực tiếp
+                  <Printer size={16} /> In
                 </button>
               </div>
             </div>
@@ -549,6 +831,49 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {/* History Modal */}
+      {showHistoryModal && (
+        <HistoryModal 
+          initialDate={selectedDate}
+          onClose={() => setShowHistoryModal(false)}
+          onSelectDateToLoad={(dateStr) => {
+            setSelectedDate(dateStr);
+          }}
+          onLoadRawTextToBulkInput={(text, dateStr) => {
+            setBulkInput(text);
+            const linesCount = text.trim().split('\n').length;
+            setInfoBanner(`Đã tải ${linesCount} bệnh nhân ngày ${format(parseISO(dateStr), 'dd/MM/yyyy')} vào ô nhập liệu. Bạn có thể xóa bệnh nhân xuất viện và bấm "Tạo bảng phân công".`);
+          }}
+        />
+      )}
+
+      {/* Copy Schedule Modal */}
+      {showCopyModal && (
+        <CopyScheduleModal
+          currentTargetDate={selectedDate}
+          isQuickYesterdayMode={isQuickYesterdayMode}
+          onClose={() => setShowCopyModal(false)}
+          onSuccess={(targetDate, newPatients, newSessions) => {
+            setSelectedDate(targetDate);
+            setPatients(newPatients);
+            setSessions(newSessions);
+          }}
+          nurses={nurses}
+          totalPatientsInDept={totalPatients}
+        />
+      )}
+
+      {/* Machine Manager Modal */}
+      {showMachineModal && (
+        <MachineManagerModal
+          machines={departmentMachines}
+          nurses={nurses}
+          onSaveMachines={handleSaveMachines}
+          onUpdateNurses={updateNurses}
+          onClose={() => setShowMachineModal(false)}
+        />
+      )}
 
       <style>{`
         @font-face {
